@@ -13,7 +13,6 @@ async function bpFetch(url, apiKey) {
   return data;
 }
 
-// Recupera tutte le pagine di un endpoint paginato
 async function bpFetchAll(endpoint, apiKey) {
   let page = 1;
   let all = [];
@@ -25,12 +24,11 @@ async function bpFetchAll(endpoint, apiKey) {
     const totalPages = meta.total_pages || meta.last_page || 1;
     if (page >= totalPages || items.length === 0) break;
     page++;
-    if (page > 50) break; // safety limit
+    if (page > 50) break;
   }
   return all;
 }
 
-// Endpoint aggregato portafoglio completo
 app.get('/portfolio', async (req, res) => {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) return res.status(401).json({ error: 'API key mancante' });
@@ -54,27 +52,18 @@ app.get('/portfolio', async (req, res) => {
   }
 });
 
-// Endpoint transazioni — recupera tutto e calcola il riepilogo
 app.get('/summary', async (req, res) => {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) return res.status(401).json({ error: 'API key mancante' });
   try {
     const transactions = await bpFetchAll('/transactions', apiKey);
-
-    let capitaleVersato = 0;
-    let numDepositi = 0;
-    let totalAcquisti = 0;
-    let totalVendite = 0;
-    let reward = 0;
-
+    let capitaleVersato = 0, numDepositi = 0, totalAcquisti = 0, totalVendite = 0, reward = 0;
     transactions.forEach(tx => {
       const a = tx.attributes || {};
       const type = (a.type || a.transaction_type || '').toUpperCase();
       const amount = parseFloat(a.amount_eur || a.amount || 0);
-
       if (['DEPOSIT', 'FIAT_DEPOSIT', 'SEPA', 'CARD'].some(t => type.includes(t))) {
-        capitaleVersato += amount;
-        numDepositi++;
+        capitaleVersato += amount; numDepositi++;
       } else if (['BUY', 'TRADE', 'SAVINGS_PLAN'].some(t => type.includes(t))) {
         totalAcquisti += amount;
       } else if (['SELL'].some(t => type.includes(t))) {
@@ -83,7 +72,6 @@ app.get('/summary', async (req, res) => {
         reward += amount;
       }
     });
-
     res.json({
       capitaleVersato: parseFloat(capitaleVersato.toFixed(2)),
       numDepositi,
@@ -94,6 +82,38 @@ app.get('/summary', async (req, res) => {
     });
   } catch (e) {
     res.status(e.status || 500).json(e.body || { error: String(e) });
+  }
+});
+
+// DEBUG — mostra struttura grezza dei dati
+app.get('/debug', async (req, res) => {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey) return res.status(401).json({ error: 'API key mancante' });
+  try {
+    const [assetWallets, fiatWallets, transactions1] = await Promise.allSettled([
+      bpFetch(BASE_V1 + '/asset-wallets', apiKey),
+      bpFetch(BASE_V1 + '/fiatwallets', apiKey),
+      bpFetch(BASE_V1 + '/transactions?page=1', apiKey),
+    ]);
+    res.json({
+      assetWallets_keys: assetWallets.status === 'fulfilled'
+        ? Object.keys(assetWallets.value?.data?.attributes || {})
+        : assetWallets.reason,
+      assetWallets_sample: assetWallets.status === 'fulfilled'
+        ? (assetWallets.value?.data?.attributes?.cryptocoin_wallets || []).slice(0, 2).map(w => w.attributes)
+        : null,
+      fiatWallets_sample: fiatWallets.status === 'fulfilled'
+        ? (fiatWallets.value?.data || []).slice(0, 2).map(w => w.attributes)
+        : fiatWallets.reason,
+      transactions_sample: transactions1.status === 'fulfilled'
+        ? (transactions1.value?.data || []).slice(0, 3).map(t => t.attributes)
+        : transactions1.reason,
+      transactions_meta: transactions1.status === 'fulfilled'
+        ? transactions1.value?.meta
+        : null,
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
   }
 });
 
