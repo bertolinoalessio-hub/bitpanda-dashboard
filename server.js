@@ -33,87 +33,90 @@ app.get('/portfolio', async (req, res) => {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) return res.status(401).json({ error: 'API key mancante' });
   try {
-    const [assetWallets, fiatWallets, ticker, securitiesWallets, commodityWallets] = await Promise.allSettled([
+    const [assetWallets, fiatWallets, ticker] = await Promise.allSettled([
       bpFetch(BASE_V1 + '/asset-wallets', apiKey),
       bpFetch(BASE_V1 + '/fiatwallets', apiKey),
       bpFetch(BASE_V1 + '/ticker', apiKey),
-      bpFetch(BASE_V1 + '/securities/wallets', apiKey),
-      bpFetch(BASE_V1 + '/commodities/wallets', apiKey),
     ]);
     res.json({
       assetWallets: assetWallets.status === 'fulfilled' ? assetWallets.value : null,
       fiatWallets: fiatWallets.status === 'fulfilled' ? fiatWallets.value : null,
       ticker: ticker.status === 'fulfilled' ? ticker.value : null,
-      securitiesWallets: securitiesWallets.status === 'fulfilled' ? securitiesWallets.value : null,
-      commodityWallets: commodityWallets.status === 'fulfilled' ? commodityWallets.value : null,
     });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
 });
 
+// Transazioni via /wallets (history per wallet)
 app.get('/summary', async (req, res) => {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) return res.status(401).json({ error: 'API key mancante' });
   try {
-    const transactions = await bpFetchAll('/transactions', apiKey);
-    let capitaleVersato = 0, numDepositi = 0, totalAcquisti = 0, totalVendite = 0, reward = 0;
-    transactions.forEach(tx => {
-      const a = tx.attributes || {};
-      const type = (a.type || a.transaction_type || '').toUpperCase();
-      const amount = parseFloat(a.amount_eur || a.amount || 0);
-      if (['DEPOSIT', 'FIAT_DEPOSIT', 'SEPA', 'CARD'].some(t => type.includes(t))) {
-        capitaleVersato += amount; numDepositi++;
-      } else if (['BUY', 'TRADE', 'SAVINGS_PLAN'].some(t => type.includes(t))) {
-        totalAcquisti += amount;
-      } else if (['SELL'].some(t => type.includes(t))) {
-        totalVendite += amount;
-      } else if (['REWARD', 'CASHBACK', 'BONUS', 'INTEREST'].some(t => type.includes(t))) {
-        reward += amount;
-      }
-    });
+    // Usa /trades e /fiatwallets/transactions che funzionano con API key
+    const [trades, fiatTx] = await Promise.allSettled([
+      bpFetchAll('/trades', apiKey),
+      bpFetchAll('/fiatwallets/transactions', apiKey),
+    ]);
+
+    let capitaleVersato = 0, numDepositi = 0;
+    let totalAcquisti = 0, totalVendite = 0, reward = 0;
+
+    // Depositi fiat
+    if (fiatTx.status === 'fulfilled') {
+      fiatTx.value.forEach(tx => {
+        const a = tx.attributes || {};
+        const type = (a.type || '').toUpperCase();
+        const amount = parseFloat(a.amount || 0);
+        if (type === 'DEPOSIT' || type === 'FIAT_DEPOSIT') {
+          capitaleVersato += amount;
+          numDepositi++;
+        }
+      });
+    }
+
+    // Acquisti e vendite
+    if (trades.status === 'fulfilled') {
+      trades.value.forEach(t => {
+        const a = t.attributes || {};
+        const type = (a.type || '').toUpperCase();
+        const amount = parseFloat(a.amount_fiat || a.price || 0);
+        if (type === 'BUY') totalAcquisti += amount;
+        else if (type === 'SELL') totalVendite += amount;
+      });
+    }
+
     res.json({
       capitaleVersato: parseFloat(capitaleVersato.toFixed(2)),
       numDepositi,
       totalAcquisti: parseFloat(totalAcquisti.toFixed(2)),
       totalVendite: parseFloat(totalVendite.toFixed(2)),
       reward: parseFloat(reward.toFixed(2)),
-      totalTransactions: transactions.length
+      fiatTxCount: fiatTx.status === 'fulfilled' ? fiatTx.value.length : 0,
+      tradesCount: trades.status === 'fulfilled' ? trades.value.length : 0,
+      fiatTxError: fiatTx.status === 'rejected' ? fiatTx.reason?.body : null,
+      tradesError: trades.status === 'rejected' ? trades.reason?.body : null,
     });
   } catch (e) {
-    res.status(e.status || 500).json(e.body || { error: String(e) });
+    res.status(500).json({ error: String(e) });
   }
 });
 
-// DEBUG — mostra struttura grezza dei dati
 app.get('/debug', async (req, res) => {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) return res.status(401).json({ error: 'API key mancante' });
   try {
-    const [assetWallets, fiatWallets, transactions1] = await Promise.allSettled([
-      bpFetch(BASE_V1 + '/asset-wallets', apiKey),
-      bpFetch(BASE_V1 + '/fiatwallets', apiKey),
-      bpFetch(BASE_V1 + '/transactions?page=1', apiKey),
-    ]);
-    res.json({
-      assetWallets_keys: assetWallets.status === 'fulfilled'
-        ? Object.keys(assetWallets.value?.data?.attributes || {})
-        : assetWallets.reason,
-      assetWallets_sample: assetWallets.status === 'fulfilled'
-        ? (assetWallets.value?.data?.attributes?.cryptocoin_wallets || []).slice(0, 2).map(w => w.attributes)
-        : null,
-      fiatWallets_sample: fiatWallets.status === 'fulfilled'
-        ? (fiatWallets.value?.data || []).slice(0, 2).map(w => w.attributes)
-        : fiatWallets.reason,
-      transactions_sample: transactions1.status === 'fulfilled'
-        ? (transactions1.value?.data || []).slice(0, 3).map(t => t.attributes)
-        : transactions1.reason,
-      transactions_meta: transactions1.status === 'fulfilled'
-        ? transactions1.value?.meta
-        : null,
-    });
+    const assetWallets = await bpFetch(BASE_V1 + '/asset-wallets', apiKey);
+    const attrs = assetWallets?.data?.attributes || {};
+    // Mostra prime 2 voci per ogni categoria
+    const sample = {};
+    for (const key of Object.keys(attrs)) {
+      const arr = attrs[key] || [];
+      sample[key] = arr.slice(0, 2).map(w => w.attributes || w);
+    }
+    res.json({ keys: Object.keys(attrs), sample });
   } catch (e) {
-    res.status(500).json({ error: String(e) });
+    res.status(e.status || 500).json(e.body || { error: String(e) });
   }
 });
 
