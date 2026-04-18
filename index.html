@@ -14,8 +14,8 @@
     padding: 20px;
   }
   .container { max-width: 1200px; margin: 0 auto; }
-  h1 { font-size: 2em; margin-bottom: 20px; color: #fff; }
-  h2 { font-size: 1.3em; margin: 24px 0 12px; color: #c9b8ff; border-bottom: 1px solid #4a3a6a; padding-bottom: 6px; }
+  h1 { font-size: 1.8em; margin-bottom: 20px; color: #fff; }
+  h2 { font-size: 1.2em; margin: 24px 0 12px; color: #c9b8ff; border-bottom: 1px solid #4a3a6a; padding-bottom: 6px; }
   .status {
     padding: 10px 14px; border-radius: 8px; margin-bottom: 16px;
     background: rgba(255,255,255,0.05); font-size: 0.9em;
@@ -23,24 +23,25 @@
   .status.error { background: rgba(220,60,60,0.2); border-left: 3px solid #e04444; }
   .status.ok { background: rgba(60,180,120,0.15); border-left: 3px solid #3cb478; }
   .kpi-grid {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 14px; margin-bottom: 20px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px; margin-bottom: 20px;
   }
   .kpi {
-    background: rgba(255,255,255,0.06); border-radius: 10px; padding: 16px;
+    background: rgba(255,255,255,0.06); border-radius: 10px; padding: 14px;
     border: 1px solid rgba(255,255,255,0.08);
   }
-  .kpi-label { font-size: 0.8em; color: #a090c0; text-transform: uppercase; letter-spacing: 0.5px; }
-  .kpi-value { font-size: 1.6em; font-weight: 600; margin-top: 6px; color: #fff; }
+  .kpi-label { font-size: 0.75em; color: #a090c0; text-transform: uppercase; letter-spacing: 0.5px; }
+  .kpi-value { font-size: 1.4em; font-weight: 600; margin-top: 6px; color: #fff; }
   .kpi-value.positive { color: #5ee8a0; }
   .kpi-value.negative { color: #ff8080; }
   table {
     width: 100%; border-collapse: collapse; background: rgba(255,255,255,0.04);
     border-radius: 8px; overflow: hidden; margin-bottom: 16px;
   }
-  th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.06); }
-  th { background: rgba(255,255,255,0.08); font-size: 0.85em; color: #c9b8ff; text-transform: uppercase; letter-spacing: 0.5px; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 0.9em; }
+  th { background: rgba(255,255,255,0.08); font-size: 0.78em; color: #c9b8ff; text-transform: uppercase; letter-spacing: 0.5px; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:hover td { background: rgba(255,255,255,0.03); }
   button {
     background: #6b4ba8; color: #fff; border: none; padding: 10px 20px;
     border-radius: 6px; cursor: pointer; font-size: 0.95em; margin-bottom: 16px;
@@ -49,6 +50,9 @@
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   .loader { display: inline-block; width: 14px; height: 14px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 8px; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  details { margin: 10px 0; background: rgba(255,255,255,0.03); padding: 10px; border-radius: 6px; }
+  summary { cursor: pointer; color: #a090c0; font-size: 0.85em; }
+  .tot-row td { font-weight: 600; background: rgba(107,75,168,0.15); }
 </style>
 </head>
 <body>
@@ -71,10 +75,14 @@
 
   <h2>💵 Wallet Fiat</h2>
   <div id="fiat"></div>
+
+  <details id="debugBox">
+    <summary>🔍 Dettagli di calcolo (debug)</summary>
+    <div id="debug" style="font-family:monospace;font-size:0.8em;margin-top:10px;white-space:pre-wrap;color:#b0a0d0;"></div>
+  </details>
 </div>
 
 <script>
-// ⚠️ Sostituire con l'URL Render dopo il deploy
 const PROXY_URL = 'https://bitpanda-proxy.onrender.com';
 
 const fmt = (n, d = 2) => Number(n).toLocaleString('it-IT', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -92,6 +100,78 @@ function getPrice(ticker, symbol) {
   return parseFloat(t.EUR || 0);
 }
 
+function extractWallets(assets, categoryKey) {
+  try {
+    return assets?.data?.attributes?.[categoryKey]?.attributes?.wallets || [];
+  } catch { return []; }
+}
+
+// --- Classificazione trade ---
+function classifyTrade(trade) {
+  const a = trade.attributes || {};
+  const tags = (a.tags || []).map(t => {
+    const name = t?.attributes?.short_name || t?.attributes?.name || '';
+    return name.toLowerCase();
+  });
+  const tagString = tags.join(' ');
+  
+  if (tagString.includes('reward') || tagString.includes('cashplus')) return 'reward';
+  if (tagString.includes('dividend')) return 'dividend';
+  if (a.is_swap === true) return 'swap';
+  
+  const type = (a.type || '').toLowerCase();
+  if (type === 'buy') return 'buy';
+  if (type === 'sell') return 'sell';
+  return 'other';
+}
+
+function calcFiatDepositsNet(fiatTx) {
+  let depositi = 0;
+  let prelievi = 0;
+  
+  fiatTx.forEach(tx => {
+    const a = tx.attributes || {};
+    const amount = parseFloat(a.amount || 0);
+    const type = (a.type || '').toLowerCase();
+    const direction = (a.in_or_out || '').toLowerCase();
+    const status = (a.status || '').toLowerCase();
+    
+    if (status !== 'finished') return;
+    
+    if (type === 'deposit' && direction === 'incoming') depositi += amount;
+    else if (type === 'withdrawal' && direction === 'outgoing') prelievi += amount;
+  });
+  
+  return { depositi, prelievi, netto: depositi - prelievi };
+}
+
+function calcFromTrades(trades) {
+  let totaleAcquisti = 0;
+  let totaleVendite = 0;
+  let totaleReward = 0;
+  let totaleDividendi = 0;
+  let conteggi = { buy: 0, sell: 0, reward: 0, dividend: 0, swap: 0, other: 0 };
+  
+  trades.forEach(t => {
+    const a = t.attributes || {};
+    const status = (a.status || '').toLowerCase();
+    if (status !== 'finished') return;
+    
+    const amountFiat = parseFloat(a.amount_fiat || 0);
+    const kind = classifyTrade(t);
+    conteggi[kind] = (conteggi[kind] || 0) + 1;
+    
+    switch (kind) {
+      case 'buy': totaleAcquisti += amountFiat; break;
+      case 'sell': totaleVendite += amountFiat; break;
+      case 'reward': totaleReward += amountFiat; break;
+      case 'dividend': totaleDividendi += amountFiat; break;
+    }
+  });
+  
+  return { totaleAcquisti, totaleVendite, totaleReward, totaleDividendi, conteggi };
+}
+
 function renderKPI(data) {
   const grid = document.getElementById('kpiGrid');
   grid.innerHTML = '';
@@ -103,7 +183,8 @@ function renderKPI(data) {
     { label: 'ROI', value: fmt(data.roi) + ' %', cls: data.roi >= 0 ? 'positive' : 'negative' },
     { label: 'Totale acquisti', value: fmtEur(data.totaleAcquisti) },
     { label: 'Totale vendite', value: fmtEur(data.totaleVendite) },
-    { label: 'Reward ricevuti', value: fmtEur(data.totaleReward) }
+    { label: 'Reward', value: fmtEur(data.totaleReward) },
+    { label: 'Dividendi', value: fmtEur(data.totaleDividendi) }
   ];
   
   items.forEach(i => {
@@ -130,9 +211,11 @@ function renderAssetTable(containerId, wallets, ticker) {
     .sort((a, b) => b.value - a.value);
   
   if (rows.length === 0) {
-    container.innerHTML = '<p style="color:#888;padding:10px;">Nessun asset.</p>';
-    return;
+    container.innerHTML = '<p style="color:#888;padding:10px;">Nessun asset con saldo.</p>';
+    return { total: 0, count: 0 };
   }
+  
+  const total = rows.reduce((s, r) => s + r.value, 0);
   
   let html = `<table><thead><tr>
     <th>Simbolo</th><th>Nome</th>
@@ -141,14 +224,16 @@ function renderAssetTable(containerId, wallets, ticker) {
   rows.forEach(r => {
     html += `<tr>
       <td><strong>${r.symbol}</strong></td>
-      <td>${r.name}</td>
+      <td>${r.name.replace(' Wallet', '')}</td>
       <td class="num">${fmt(r.balance, 6)}</td>
       <td class="num">${fmtEur(r.price)}</td>
       <td class="num">${fmtEur(r.value)}</td>
     </tr>`;
   });
+  html += `<tr class="tot-row"><td colspan="4"><strong>Totale</strong></td><td class="num"><strong>${fmtEur(total)}</strong></td></tr>`;
   html += '</tbody></table>';
   container.innerHTML = html;
+  return { total, count: rows.length };
 }
 
 function renderFiat(fiats) {
@@ -162,68 +247,19 @@ function renderFiat(fiats) {
     .filter(r => r.balance > 0);
   
   if (rows.length === 0) {
-    container.innerHTML = '<p style="color:#888;padding:10px;">Nessun fiat.</p>';
-    return;
+    container.innerHTML = '<p style="color:#888;padding:10px;">Nessun fiat con saldo.</p>';
+    return 0;
   }
   
   let html = '<table><thead><tr><th>Valuta</th><th>Nome</th><th class="num">Saldo</th></tr></thead><tbody>';
   rows.forEach(r => {
-    html += `<tr><td><strong>${r.symbol}</strong></td><td>${r.name}</td><td class="num">${fmt(r.balance)}</td></tr>`;
+    html += `<tr><td><strong>${r.symbol}</strong></td><td>${r.name.replace(' Wallet', '')}</td><td class="num">${fmt(r.balance)}</td></tr>`;
   });
   html += '</tbody></table>';
   container.innerHTML = html;
-}
-
-function extractWallets(assets, categoryKey) {
-  try {
-    return assets?.data?.attributes?.[categoryKey]?.attributes?.wallets || [];
-  } catch { return []; }
-}
-
-function calcPortfolioValue(assets, ticker) {
-  let total = 0;
-  ['cryptocoin', 'commodity', 'index', 'security', 'equity_security'].forEach(cat => {
-    const wallets = extractWallets(assets, cat);
-    wallets.forEach(w => {
-      const bal = parseFloat(w.attributes.balance || 0);
-      const price = getPrice(ticker, w.attributes.cryptocoin_symbol);
-      total += bal * price;
-    });
-  });
-  // Somma anche il fiat
-  return total;
-}
-
-function calcFiatTotal(fiats) {
-  return (fiats.data || []).reduce((sum, w) => sum + parseFloat(w.attributes.balance || 0), 0);
-}
-
-function calcFromTransactions(fiatTx, trades) {
-  let capitaleVersato = 0;
-  let totaleAcquisti = 0;
-  let totaleVendite = 0;
-  let totaleReward = 0;
   
-  // Depositi: type === 'deposit' sul fiat wallet
-  fiatTx.forEach(tx => {
-    const a = tx.attributes || {};
-    const amount = parseFloat(a.amount || 0);
-    const type = (a.type || '').toLowerCase();
-    if (type === 'deposit') capitaleVersato += amount;
-  });
-  
-  // Trades
-  trades.forEach(t => {
-    const a = t.attributes || {};
-    const amountFiat = parseFloat(a.amount_fiat || 0);
-    const type = (a.type || '').toLowerCase();
-    
-    if (type === 'buy') totaleAcquisti += amountFiat;
-    else if (type === 'sell') totaleVendite += amountFiat;
-    else if (type === 'reward' || type === 'deposit') totaleReward += amountFiat;
-  });
-  
-  return { capitaleVersato, totaleAcquisti, totaleVendite, totaleReward };
+  const eurRow = rows.find(r => r.symbol === 'EUR');
+  return eurRow ? eurRow.balance : 0;
 }
 
 async function loadAll() {
@@ -232,38 +268,53 @@ async function loadAll() {
   setStatus('<span class="loader"></span>Caricamento portfolio...', '');
   
   try {
-    // 1. Portfolio (asset + fiat + ticker)
     const pRes = await fetch(`${PROXY_URL}/portfolio`);
     if (!pRes.ok) throw new Error(`Portfolio HTTP ${pRes.status}`);
     const { assets, fiats, ticker } = await pRes.json();
     
-    setStatus('<span class="loader"></span>Caricamento storico transazioni...', '');
+    setStatus('<span class="loader"></span>Caricamento storico transazioni (10-30s)...', '');
     
-    // 2. Summary (depositi + trades)
     const sRes = await fetch(`${PROXY_URL}/summary`);
     if (!sRes.ok) throw new Error(`Summary HTTP ${sRes.status}`);
     const { fiatTransactions, trades } = await sRes.json();
     
-    // 3. Calcoli
-    const valoreAsset = calcPortfolioValue(assets, ticker);
-    const valoreFiat = calcFiatTotal(fiats);
-    const valoreAttuale = valoreAsset + valoreFiat;
-    const { capitaleVersato, totaleAcquisti, totaleVendite, totaleReward } = calcFromTransactions(fiatTransactions, trades);
-    const risultato = valoreAttuale - capitaleVersato;
-    const roi = capitaleVersato > 0 ? (risultato / capitaleVersato) * 100 : 0;
-    
-    renderKPI({ capitaleVersato, valoreAttuale, risultato, roi, totaleAcquisti, totaleVendite, totaleReward });
-    
-    // 4. Tabelle
-    renderAssetTable('crypto', extractWallets(assets, 'cryptocoin'), ticker);
+    const cryptoTot = renderAssetTable('crypto', extractWallets(assets, 'cryptocoin'), ticker);
     const etfWallets = [
       ...extractWallets(assets, 'index'),
       ...extractWallets(assets, 'security'),
       ...extractWallets(assets, 'equity_security')
     ];
-    renderAssetTable('etf', etfWallets, ticker);
-    renderAssetTable('commodity', extractWallets(assets, 'commodity'), ticker);
-    renderFiat(fiats);
+    const etfTot = renderAssetTable('etf', etfWallets, ticker);
+    const commodityTot = renderAssetTable('commodity', extractWallets(assets, 'commodity'), ticker);
+    const fiatEur = renderFiat(fiats);
+    
+    const valoreAsset = cryptoTot.total + etfTot.total + commodityTot.total;
+    const valoreAttuale = valoreAsset + fiatEur;
+    
+    const { depositi, prelievi, netto: depositiNetti } = calcFiatDepositsNet(fiatTransactions);
+    const { totaleAcquisti, totaleVendite, totaleReward, totaleDividendi, conteggi } = calcFromTrades(trades);
+    
+    const capitaleVersato = depositiNetti + totaleReward + totaleDividendi;
+    const risultato = valoreAttuale - capitaleVersato;
+    const roi = capitaleVersato > 0 ? (risultato / capitaleVersato) * 100 : 0;
+    
+    renderKPI({
+      capitaleVersato, valoreAttuale, risultato, roi,
+      totaleAcquisti, totaleVendite, totaleReward, totaleDividendi
+    });
+    
+    document.getElementById('debug').textContent =
+      `Transazioni fiat totali: ${fiatTransactions.length}\n` +
+      `  Depositi lordi: ${fmtEur(depositi)}\n` +
+      `  Prelievi: ${fmtEur(prelievi)}\n` +
+      `  Depositi netti: ${fmtEur(depositiNetti)}\n` +
+      `\nTrades totali: ${trades.length}\n` +
+      `  Buy: ${conteggi.buy}, Sell: ${conteggi.sell}\n` +
+      `  Reward: ${conteggi.reward}, Dividendi: ${conteggi.dividend}\n` +
+      `  Swap (esclusi): ${conteggi.swap}, Other: ${conteggi.other}\n` +
+      `\nValore asset: ${fmtEur(valoreAsset)}\n` +
+      `Fiat EUR: ${fmtEur(fiatEur)}\n` +
+      `Valore totale: ${fmtEur(valoreAttuale)}`;
     
     setStatus(`✅ Dati aggiornati — ${new Date().toLocaleTimeString('it-IT')}`, 'ok');
   } catch (err) {
