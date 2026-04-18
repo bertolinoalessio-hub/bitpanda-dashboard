@@ -2,102 +2,97 @@ const express = require('express');
 const cors = require('cors');
 
 const app = express();
+const PORT = process.env.PORT || 10000;
+const API_KEY = process.env.BITPANDA_API_KEY;
+const BASE_URL = 'https://api.bitpanda.com/v1';
+
 app.use(cors());
+app.use(express.json());
 
-const BASE_V1 = 'https://api.bitpanda.com/v1';
-
-async function bpFetch(url, apiKey) {
-  const res = await fetch(url, { headers: { 'X-API-KEY': apiKey } });
-  const data = await res.json();
-  if (!res.ok) throw { status: res.status, body: data };
-  return data;
+// --- Helper per chiamate Bitpanda ---
+async function bitpandaFetch(endpoint) {
+  if (!API_KEY) throw new Error('BITPANDA_API_KEY non configurata');
+  
+  const res = await fetch(`${BASE_URL}${endpoint}`, {
+    headers: {
+      'X-Api-Key': API_KEY,
+      'Accept': 'application/json'
+    }
+  });
+  
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Bitpanda ${endpoint} → ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
 }
 
-async function bpFetchAll(endpoint, apiKey) {
-  let page = 1;
+// --- Helper paginazione (per /trades e /fiatwallets/transactions) ---
+async function fetchAllPaged(endpoint) {
   let all = [];
+  let page = 1;
+  const pageSize = 500;
+  
   while (true) {
-    const data = await bpFetch(BASE_V1 + endpoint + '?page=' + page + '&page_size=100', apiKey);
-    const items = data.data || [];
+    const separator = endpoint.includes('?') ? '&' : '?';
+    const url = `${endpoint}${separator}page=${page}&page_size=${pageSize}`;
+    const result = await bitpandaFetch(url);
+    
+    const items = result.data || [];
     all = all.concat(items);
-    const meta = data.meta || {};
-    const totalPages = meta.total_pages || meta.last_page || 1;
-    if (page >= totalPages || items.length === 0) break;
+    
+    // Se abbiamo ricevuto meno del pageSize, siamo alla fine
+    if (items.length < pageSize) break;
     page++;
-    if (page > 100) break;
+    
+    // Safety net contro loop infiniti
+    if (page > 50) break;
   }
   return all;
 }
 
+// --- Endpoint: health ---
+app.get('/health', (req, res) => {
+  res.json({ ok: true, timestamp: new Date().toISOString() });
+});
+
+// --- Endpoint: portfolio (asset + fiat + ticker) ---
 app.get('/portfolio', async (req, res) => {
-  const apiKey = req.headers['x-api-key'];
-  if (!apiKey) return res.status(401).json({ error: 'API key mancante' });
   try {
-    const [assetWallets, fiatWallets, ticker] = await Promise.allSettled([
-      bpFetch(BASE_V1 + '/asset-wallets', apiKey),
-      bpFetch(BASE_V1 + '/fiatwallets', apiKey),
-      bpFetch(BASE_V1 + '/ticker', apiKey),
+    const [assets, fiats, ticker] = await Promise.all([
+      bitpandaFetch('/asset-wallets'),
+      bitpandaFetch('/fiatwallets'),
+      bitpandaFetch('/ticker')
     ]);
-    res.json({
-      assetWallets: assetWallets.status === 'fulfilled' ? assetWallets.value : null,
-      fiatWallets: fiatWallets.status === 'fulfilled' ? fiatWallets.value : null,
-      ticker: ticker.status === 'fulfilled' ? ticker.value : null,
-    });
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
+    res.json({ assets, fiats, ticker });
+  } catch (err) {
+    console.error('[/portfolio]', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
+// --- Endpoint: summary (depositi + trades, con paginazione) ---
 app.get('/summary', async (req, res) => {
-  const apiKey = req.headers['x-api-key'];
-  if (!apiKey) return res.status(401).json({ error: 'API key mancante' });
   try {
-    const [trades, fiatTx] = await Promise.allSettled([
-      bpFetchAll('/trades', apiKey),
-      bpFetchAll('/fiatwallets/transactions', apiKey),
+    const [fiatTx, trades] = await Promise.all([
+      fetchAllPaged('/fiatwallets/transactions'),
+      fetchAllPaged('/trades')
     ]);
-
-    let capitaleVersato = 0, numDepositi = 0;
-    let totalAcquisti = 0, totalVendite = 0, reward = 0;
-
-    if (fiatTx.status === 'fulfilled') {
-      fiatTx.value.forEach(tx => {
-        const a = tx.attributes || {};
-        const type = (a.type || '').toUpperCase();
-        const amount = parseFloat(a.amount || 0);
-        if (type === 'DEPOSIT' || type === 'FIAT_DEPOSIT' || type === 'TRANSFER_IN') {
-          capitaleVersato += amount;
-          numDepositi++;
-        }
-      });
-    }
-
-    if (trades.status === 'fulfilled') {
-      trades.value.forEach(t => {
-        const a = t.attributes || {};
-        const type = (a.type || '').toUpperCase();
-        const amount = parseFloat(a.amount_fiat || a.price || 0);
-        if (type === 'BUY') totalAcquisti += amount;
-        else if (type === 'SELL') totalVendite += amount;
-        else if (type === 'REWARD' || type === 'CASHBACK') reward += amount;
-      });
-    }
-
-    res.json({
-      capitaleVersato: parseFloat(capitaleVersato.toFixed(2)),
-      numDepositi,
-      totalAcquisti: parseFloat(totalAcquisti.toFixed(2)),
-      totalVendite: parseFloat(totalVendite.toFixed(2)),
-      reward: parseFloat(reward.toFixed(2)),
-      fiatTxCount: fiatTx.status === 'fulfilled' ? fiatTx.value.length : 0,
-      tradesCount: trades.status === 'fulfilled' ? trades.value.length : 0,
-    });
-  } catch (e) {
-    res.status(e.status || 500).json(e.body || { error: String(e) });
+    res.json({ fiatTransactions: fiatTx, trades });
+  } catch (err) {
+    console.error('[/summary]', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/health', (_, res) => res.json({ ok: true }));
+// --- Root: info di servizio ---
+app.get('/', (req, res) => {
+  res.json({
+    service: 'bitpanda-proxy',
+    endpoints: ['/health', '/portfolio', '/summary']
+  });
+});
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Proxy attivo su porta ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Proxy Bitpanda in ascolto su porta ${PORT}`);
+});
