@@ -40,7 +40,7 @@
   .api-section { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
   .api-section label { display: block; font-size: 0.6rem; letter-spacing: 0.15em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
   .input-row { display: flex; gap: 8px; }
-  input[type="password"] {
+  input[type="password"], input[type="text"] {
     flex: 1; background: var(--surface2); border: 1px solid var(--border);
     border-radius: 8px; padding: 12px 14px; color: var(--text);
     font-family: 'DM Mono', monospace; font-size: 0.72rem; font-weight: 300;
@@ -58,6 +58,23 @@
   button:disabled { opacity: 0.4; cursor: not-allowed; }
   .hint { margin-top: 10px; font-size: 0.58rem; color: var(--muted); line-height: 1.6; }
   .hint a { color: var(--accent); text-decoration: none; }
+
+  .saved-badge {
+    display: none;
+    margin-top: 10px;
+    font-size: 0.58rem;
+    color: var(--gain);
+    align-items: center;
+    gap: 6px;
+  }
+  .saved-badge.visible { display: flex; }
+  .forget-link {
+    color: var(--loss);
+    cursor: pointer;
+    margin-left: 8px;
+    text-decoration: underline;
+    font-size: 0.58rem;
+  }
 
   .status-bar {
     padding: 12px 16px; border-radius: 8px; font-size: 0.65rem;
@@ -116,9 +133,13 @@
       <input type="password" id="apiKey" placeholder="Incolla la tua API key…" autocomplete="off" />
       <button id="loadBtn" onclick="loadData()">Carica</button>
     </div>
+    <div class="saved-badge" id="savedBadge">
+      ✓ API key salvata su questo dispositivo
+      <span class="forget-link" onclick="forgetKey()">Dimentica</span>
+    </div>
     <div class="hint">
       Genera una chiave su <a href="https://web.bitpanda.com/en/account/apikeys" target="_blank">Bitpanda → Account → API Keys</a>
-      con permessi <strong>read-only</strong>. La chiave non lascia mai il tuo dispositivo.
+      con permessi <strong>read-only</strong>. La chiave è salvata solo su questo dispositivo.
     </div>
   </div>
 
@@ -132,7 +153,6 @@
       <span class="ts" id="lastUpdate"></span>
       <button class="btn-sm" onclick="loadData()">↻ Aggiorna</button>
     </div>
-
     <div class="hero">
       <div class="hero-cell">
         <div class="cell-label">Valore portafoglio</div>
@@ -145,24 +165,39 @@
         <div class="cell-sub">wallet EUR</div>
       </div>
     </div>
-
     <div class="section-title">Asset in portafoglio</div>
     <div class="asset-list" id="assetList"></div>
-
     <div class="section-title" id="fiatTitle" style="display:none">Wallet fiat</div>
     <div id="fiatList"></div>
   </div>
 
   <footer>
     Dati in tempo reale via Bitpanda API v1 · Sola lettura<br>
-    La API key non lascia mai il tuo dispositivo
+    La API key è salvata solo su questo dispositivo
   </footer>
 
 </div>
 
 <script>
-  // URL del proxy su Render — verrà aggiornato dopo il deploy
   const PROXY = 'https://bitpanda-proxy.onrender.com';
+  const STORAGE_KEY = 'bp_api_key';
+
+  // Carica key salvata all'avvio
+  window.addEventListener('DOMContentLoaded', () => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      document.getElementById('apiKey').value = saved;
+      document.getElementById('savedBadge').classList.add('visible');
+      loadData();
+    }
+  });
+
+  function forgetKey() {
+    localStorage.removeItem(STORAGE_KEY);
+    document.getElementById('apiKey').value = '';
+    document.getElementById('savedBadge').classList.remove('visible');
+    document.getElementById('dashboard').style.display = 'none';
+  }
 
   function setStatus(type, msg) {
     const bar = document.getElementById('statusBar');
@@ -198,12 +233,16 @@
     setStatus('loading', 'Connessione in corso…');
 
     try {
-      setStatus('loading', 'Caricamento asset…');
       const [walletsData, fiatData, tickerData] = await Promise.all([
         proxyFetch('/wallets', key),
         proxyFetch('/fiatwallets', key),
         proxyFetch('/ticker', key).catch(() => null)
       ]);
+
+      // Salva la key solo se il login ha avuto successo
+      localStorage.setItem(STORAGE_KEY, key);
+      document.getElementById('savedBadge').classList.add('visible');
+
       hideStatus();
       renderDashboard(walletsData, fiatData, tickerData);
     } catch (e) {
@@ -211,6 +250,8 @@
         setStatus('error', 'Proxy non raggiungibile — riprova tra qualche secondo');
       } else if (e.message.includes('401') || e.message.includes('403')) {
         setStatus('error', 'API key non valida o scaduta');
+        localStorage.removeItem(STORAGE_KEY);
+        document.getElementById('savedBadge').classList.remove('visible');
       } else {
         setStatus('error', 'Errore: ' + e.message);
       }
